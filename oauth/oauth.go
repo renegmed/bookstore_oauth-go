@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/mercadolibre/golang-restclient/rest"
+	//"github.com/mercadolibre/golang-restclient/rest"
+	resty "github.com/go-resty/resty/v2"
 	"github.com/renegmed/bookstore_utils-go/rest_errors"
 )
 
@@ -21,12 +21,14 @@ const (
 	paramAccessToken = "access_token"
 )
 
-var (
-	oauthRestClient = rest.RequestBuilder{
-		BaseURL: "http://localhost:8080",
-		Timeout: 200 * time.Millisecond,
-	}
-)
+// var (
+// 	// oauthRestClient = rest.RequestBuilder{
+// 	// 	BaseURL: "http://localhost:8080",
+// 	// 	Timeout: 200 * time.Millisecond,
+// 	// }
+
+// 	oauthRestClient = resty.New()
+// )
 
 type accessToken struct {
 	Id       string `json:"id"`
@@ -34,76 +36,94 @@ type accessToken struct {
 	ClientId int64  `json:"client_id"`
 }
 
-func IsPublic(request *http.Request) bool {
-	if request == nil {
-		return true
-	}
-	return request.Header.Get(headerXPublic) == "true"
+type AccessTokenService struct {
+	Client *resty.Client
 }
 
-func GetCallerId(request *http.Request) int64 {
-	if request == nil {
+func (ats *AccessTokenService) IsPublic() bool {
+	if ats.Client.R() == nil {
+		return true
+	}
+
+	//log.Println("+++++ header:", ats.Client.Header.Get(headerXPublic))
+
+	return ats.Client.Header.Get(headerXPublic) == "true"
+}
+
+func (ats *AccessTokenService) GetCallerId() int64 {
+	if ats.Client.R() == nil {
 		return 0
 	}
-	callerId, err := strconv.ParseInt(request.Header.Get(headerXCallerId), 10, 64)
+	callerId, err := strconv.ParseInt(ats.Client.R().Header.Get(headerXCallerId), 10, 64)
 	if err != nil {
 		return 0
 	}
 	return callerId
 }
 
-func GetClientId(request *http.Request) int64 {
-	if request == nil {
+func (ats *AccessTokenService) GetClientId() int64 {
+	if ats.Client.R() == nil {
 		return 0
 	}
-	clientId, err := strconv.ParseInt(request.Header.Get(headerXClientId), 10, 64)
+	clientId, err := strconv.ParseInt(ats.Client.R().Header.Get(headerXClientId), 10, 64)
 	if err != nil {
 		return 0
 	}
 	return clientId
 }
 
-func AuthenticateRequest(request *http.Request) rest_errors.RestErr {
-	if request == nil {
+func (ats *AccessTokenService) AuthenticateRequest() rest_errors.RestErr {
+	if ats.Client.R() == nil {
 		return nil
 	}
 
-	cleanRequest(request)
+	ats.CleanRequest()
 
-	accessTokenId := strings.TrimSpace(request.URL.Query().Get(paramAccessToken))
+	//accessTokenId := strings.TrimSpace(ats.Client.R().URL.Query().Get(paramAccessToken))
+	accessTokenId := strings.TrimSpace(ats.Client.R().QueryParam.Get(paramAccessToken))
 	if accessTokenId == "" {
 		return nil
 	}
 
-	at, err := getAccessToken(accessTokenId)
+	at, err := ats.GetAccessToken(accessTokenId)
 	if err != nil {
 		if err.Status() == http.StatusNotFound {
 			return nil
 		}
 		return err
 	}
-	request.Header.Add(headerXClientId, fmt.Sprintf("%v", at.ClientId))
-	request.Header.Add(headerXCallerId, fmt.Sprintf("%v", at.UserId))
+	ats.Client.R().Header.Add(headerXClientId, fmt.Sprintf("%v", at.ClientId))
+	ats.Client.R().Header.Add(headerXCallerId, fmt.Sprintf("%v", at.UserId))
 	return nil
 }
 
-func cleanRequest(request *http.Request) {
-	if request == nil {
+func (ats *AccessTokenService) CleanRequest() {
+	if ats.Client.R() == nil {
 		return
 	}
-	request.Header.Del(headerXClientId)
-	request.Header.Del(headerXCallerId)
+	ats.Client.R().Header.Del(headerXClientId)
+	ats.Client.R().Header.Del(headerXCallerId)
 }
 
-func getAccessToken(accessTokenId string) (*accessToken, rest_errors.RestErr) {
-	response := oauthRestClient.Get(fmt.Sprintf("/oauth/access_token/%s", accessTokenId))
-	if response == nil || response.Response == nil {
+func (ats *AccessTokenService) GetAccessToken(accessTokenId string) (*accessToken, rest_errors.RestErr) {
+
+	response, err := ats.Client.R().
+		SetHeader("Content-Type", "application/json").
+		SetHeader("Accept", "appication/json").
+		Get(fmt.Sprintf("/oauth/access_token/%s", accessTokenId))
+
+	//fmt.Println(".....response:", response)
+
+	if err != nil {
+		return nil, rest_errors.NewInternalServerError("error on trying to get access token", err)
+	}
+	if response == nil || response.RawResponse == nil {
 		return nil, rest_errors.NewInternalServerError("invalid restclient response when trying to get access token",
 			errors.New("network timeout"))
 	}
 
-	if response.StatusCode > 299 {
-		restErr, err := rest_errors.NewRestErrorFromBytes(response.Bytes())
+	if response.RawResponse.StatusCode > 299 {
+		restErr, err := rest_errors.NewRestErrorFromBytes(response.Body())
 		if err != nil {
 			return nil, rest_errors.NewInternalServerError("invalid error interface when trying to get access token", err)
 		}
@@ -111,7 +131,7 @@ func getAccessToken(accessTokenId string) (*accessToken, rest_errors.RestErr) {
 	}
 
 	var at accessToken
-	if err := json.Unmarshal(response.Bytes(), &at); err != nil {
+	if err := json.Unmarshal(response.Body(), &at); err != nil {
 		return nil, rest_errors.NewInternalServerError("error when trying to unmarshal access token response",
 			errors.New("error processing json"))
 	}
